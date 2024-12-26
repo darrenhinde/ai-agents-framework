@@ -1,0 +1,19 @@
+{
+  "name": "@ai-agents/core",
+  "version": "0.1.0",
+  "dependencies": {
+    "@ai-sdk/anthropic": "^1.0.6",
+    "@ai-sdk/google": "^1.0.12",
+    "@ai-sdk/openai": "^1.0.11",
+    "ollama-ai-provider": "^1.1.0", 
+    "@opentelemetry/api-logs": "^0.53.0",
+    "@opentelemetry/auto-instrumentations-node": "^0.55.0",
+    "@opentelemetry/instrumentation": "^0.53.0",
+    "@opentelemetry/sdk-logs": "^0.53.0",
+    "@opentelemetry/sdk-node": "^0.57.0",
+    "@vercel/otel": "^1.10.0",
+    "ai": "^4.0.0",
+    "langfuse": "^3.27.0",
+    "langfuse-vercel": "^3.32.0"
+  }
+}

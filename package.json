@@ -1,0 +1,27 @@
+{
+  "name": "ai-agents-framework",
+  "version": "0.0.1",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "clean": "turbo run clean",
+    "format": "prettier --write \"**/*.{ts,tsx,md}\""
+  },
+  "devDependencies": {
+    "turbo": "^1.11.2",
+    "prettier": "^3.1.1",
+    "typescript": "^5.3.3"
+  },
+  "packageManager": "npm@10.2.4",
+  "dependencies": {
+    "ai": "^4.0.22",
+    "langfuse": "^3.32.0",
+    "zod": "^3.24.1"
+  }
+}
