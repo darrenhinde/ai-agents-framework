@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "test:langfuse": "bun run langfuse-agent-test.ts"
+    "test:langfuse": "bun run langfuse-agent-test.ts",
+    "test:conversation": "bun run conversation-test.ts"
   },
   "dependencies": {
     "dotenv": "^16.3.1",

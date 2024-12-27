@@ -1,37 +1,27 @@
 import type { LangfuseTraceClient } from 'langfuse';
 import type { Langfuse } from 'langfuse';
 import { generateText } from 'ai';
-import type { LanguageModelV1, CoreTool, ToolExecutionOptions } from 'ai';
+import type { CoreTool, ToolExecutionOptions } from 'ai';
 import { v4 as uuidv4 } from 'uuid';
 import type { z } from 'zod';
+import type { AgentConfig, AgentOptions } from './types';
 
-export interface AgentConfig {
-  name: string;
-  traceId?: string;
-  trace?: LangfuseTraceClient;
-  metadata?: Record<string, unknown>;
-  createNewTrace?: boolean;
-  langfuse?: Langfuse;
-  parentTraceId?: string;
-  isServerless?: boolean; // Flag to indicate if running in serverless environment
-}
-
-export interface AgentOptions {
-  maxSteps?: number;
-  systemPrompt: string;
-  tools?: Record<string, CoreTool<z.ZodType<Record<string, unknown>>, unknown>>;
-  model: LanguageModelV1;
-  requireStructuredOutput?: boolean; // Add option for requiring structured output
-}
-
+/**
+ * Context for tool execution with tracing capabilities
+ */
 interface ToolContext {
-  traceId: string;
-  trace: LangfuseTraceClient;
-  parentSpanId?: string;
-  toolResultCache?: Map<string, unknown>; // Add cache for tool results
+  traceId: string;                                    // Unique identifier for the trace
+  trace: LangfuseTraceClient;                        // Langfuse trace client for logging
+  parentSpanId?: string;                             // Optional parent span for nested operations
+  toolResultCache?: Map<string, unknown>;            // Cache to store tool results and avoid duplicates
 }
 
-// Safe wrapper for Langfuse operations with proper error handling
+/**
+ * Safely executes Langfuse operations with error handling
+ * @param operation - The Langfuse operation to execute
+ * @param errorMessage - Message to log if operation fails
+ * @param defaultValue - Optional fallback value
+ */
 async function safeTraceOperation<T>(
   operation: () => Promise<T>,
   errorMessage: string,
@@ -151,33 +141,52 @@ function wrapToolWithTracing(
   return wrappedTool;
 }
 
+/**
+ * Creates an agent that can process messages and use tools
+ * @param config - Agent configuration including tracing options
+ * @returns An async function that processes messages with the configured agent
+ * 
+ * Example usage:
+ * ```typescript
+ * const agent = createAgent({
+ *   name: 'weather-agent',
+ *   langfuse: langfuseClient,     // Optional: for tracing
+ *   createNewTrace: true,         // Optional: create new trace for each call
+ *   metadata: {                   // Optional: additional context
+ *     environment: 'production'
+ *   }
+ * });
+ * ```
+ */
 export function createAgent(config: AgentConfig) {
   return async function agent(
-    options: AgentOptions,
-    userPrompt: string
+    options: AgentOptions,    // Configuration for this specific agent call
+    userPrompt: string        // The current user's message
   ) {
-    const traceId = config.traceId || uuidv4();
-    let trace = config.trace;
-    let response: unknown;
-    const toolResultCache = new Map<string, unknown>();
+    const traceId = config.traceId || uuidv4();                    // Generate or use provided trace ID
+    let trace = config.trace;                                      // Use existing trace if provided
+    let response: unknown;                                         // Store the final response
+    const toolResultCache = new Map<string, unknown>();            // Cache for tool results
 
-    // Create new trace if requested or if no trace exists
+    // Create new trace if requested or none exists
     if (config.langfuse && (!trace || config.createNewTrace)) {
       const newTrace = await safeTraceOperation(
         async () => config.langfuse?.trace({
           id: traceId,
           name: `${config.name}-trace`,
           metadata: {
-            ...config.metadata,
-            parentTraceId: config.parentTraceId,
-            isServerless: config.isServerless,
-            requireStructuredOutput: options.requireStructuredOutput,
-            maxSteps: options.maxSteps
+            ...config.metadata,                                    // User-provided metadata
+            parentTraceId: config.parentTraceId,                  // For linking traces
+            isServerless: config.isServerless,                    // Serverless environment flag
+            requireStructuredOutput: options.requireStructuredOutput,  // Structured output flag
+            maxSteps: options.maxSteps,                          // Max steps for tool usage
+            model: options.model.modelId                         // Model identifier
           },
           input: {
-            systemPrompt: options.systemPrompt,
-            userPrompt,
-            tools: Object.keys(options.tools || {}),
+            systemPrompt: options.systemPrompt,                  // System instructions
+            messages: options.messages,                          // Conversation history
+            userPrompt,                                         // Current user message
+            tools: Object.keys(options.tools || {}),            // Available tools
             timestamp: new Date().toISOString()
           }
         }),
@@ -188,30 +197,47 @@ export function createAgent(config: AgentConfig) {
       }
     }
 
-    // Create main span for agent execution if tracing is available
+    // Create main span for agent execution
     const mainSpanId = uuidv4();
     if (trace) {
       await safeTraceOperation(
         async () => {
           if (!trace) return;
           
+          // Log initial generation
+          trace.generation({
+            name: 'initial-prompt',
+            model: options.model.modelId,
+            modelParameters: {
+              maxSteps: options.maxSteps,
+              requireStructuredOutput: options.requireStructuredOutput
+            },
+            input: {
+              systemPrompt: options.systemPrompt,
+              userPrompt,
+              timestamp: new Date().toISOString()
+            }
+          });
+
+          // Start main execution span
           trace.span({
-            name: `${config.name}-agent-start`,
+            name: `${config.name}-agent-execution`,
             id: mainSpanId,
             input: {
               systemPrompt: options.systemPrompt,
               userPrompt,
               parentTraceId: config.parentTraceId,
+              timestamp: new Date().toISOString(),
               ...config.metadata
             }
           });
         },
-        'Failed to create agent start span'
+        'Failed to create agent spans'
       );
     }
 
     try {
-      // Wrap tools with tracing if they exist and tracing is available
+      // Wrap tools with tracing if available
       const wrappedTools = options.tools && trace ? 
         Object.entries(options.tools).reduce<Record<string, CoreTool<z.ZodType<Record<string, unknown>>, unknown>>>(
           (acc, [name, tool]) => {
@@ -227,13 +253,15 @@ export function createAgent(config: AgentConfig) {
         ) : 
         options.tools;
 
+      // Generate response using Vercel AI SDK
       const result = await generateText({
         ...options,
-        tools: wrappedTools,
-        prompt: userPrompt,
-        toolChoice: wrappedTools ? (options.requireStructuredOutput ? 'required' : 'auto') : 'none',
-        maxSteps: options.maxSteps || 3, // Default to 3 steps if not specified
-        experimental_telemetry: trace ? {
+        system: options.systemPrompt,                           // System instructions
+        messages: options.messages ? [...options.messages, { role: 'user', content: userPrompt }] : [{ role: 'user', content: userPrompt }],  // Full conversation with new message
+        tools: wrappedTools,                                    // Traced tools
+        toolChoice: wrappedTools ? (options.requireStructuredOutput ? 'required' : 'auto') : 'none',  // Tool usage mode
+        maxSteps: options.maxSteps || 3,                       // Default to 3 steps if not specified
+        experimental_telemetry: trace ? {                      // Telemetry for tracing
           isEnabled: true,
           functionId: `${config.name}-${options.model.modelId}`,
           metadata: {
@@ -250,43 +278,82 @@ export function createAgent(config: AgentConfig) {
         } : undefined
       });
 
-      // Log tool calls and their results if tracing is available
+      // Log tool calls with better structure
       if (trace && result.toolCalls && Array.isArray(result.toolCalls)) {
-        await Promise.all(result.toolCalls.map(async toolCall => {
+        for (const toolCall of result.toolCalls) {
           if ('toolName' in toolCall && 'args' in toolCall && trace) {
-            const toolResult = await safeTraceOperation(
-              async () => {
-                const generation = trace.generation({
-                  name: `tool-call-${toolCall.toolName}`,
-                  model: options.model.modelId,
-                  modelParameters: {
-                    tool: toolCall.toolName,
-                    maxSteps: options.maxSteps,
-                    requireStructuredOutput: options.requireStructuredOutput
-                  },
-                  input: toolCall.args
-                });
-
-                // Update the generation with the tool's output
-                if ('output' in toolCall) {
-                  generation.update({
-                    output: toolCall.output,
-                    endTime: new Date()
-                  });
-                }
-
-                return generation;
+            // Log the tool call generation
+            const toolGeneration = trace.generation({
+              name: `tool-call-${toolCall.toolName}`,
+              model: options.model.modelId,
+              modelParameters: {
+                tool: toolCall.toolName,
+                maxSteps: options.maxSteps,
+                requireStructuredOutput: options.requireStructuredOutput
               },
-              `Failed to log tool call for ${toolCall.toolName}`
-            );
+              input: {
+                args: toolCall.args,
+                timestamp: new Date().toISOString()
+              }
+            });
 
-            return toolResult;
+            // Log the tool execution span
+            const toolSpan = trace.span({
+              name: `tool-execution-${toolCall.toolName}`,
+              input: {
+                tool: toolCall.toolName,
+                args: toolCall.args,
+                timestamp: new Date().toISOString()
+              }
+            });
+
+            // Update with tool results
+            const cacheKey = JSON.stringify({ toolName: toolCall.toolName, args: toolCall.args });
+            const toolResult = toolResultCache.get(cacheKey);
+            if (toolResult) {
+              toolGeneration.update({
+                output: {
+                  result: toolResult,
+                  timestamp: new Date().toISOString()
+                }
+              });
+
+              toolSpan.end({
+                output: {
+                  result: toolResult,
+                  timestamp: new Date().toISOString()
+                }
+              });
+            }
           }
-          return Promise.resolve();
-        }));
+        }
       }
 
-      // Format the response based on whether structured output is required
+      // Log final generation
+      if (trace) {
+        trace.generation({
+          name: 'final-response',
+          model: options.model.modelId,
+          modelParameters: {
+            maxSteps: options.maxSteps,
+            requireStructuredOutput: options.requireStructuredOutput
+          },
+          input: {
+            toolResults: Array.from(toolResultCache.entries()).map(([key, value]) => ({
+              tool: JSON.parse(key).toolName,
+              result: value
+            })),
+            timestamp: new Date().toISOString()
+          },
+          output: {
+            text: result.text,
+            toolCalls: result.toolCalls,
+            timestamp: new Date().toISOString()
+          }
+        });
+      }
+
+      // Format response
       response = options.requireStructuredOutput ? {
         toolCalls: result.toolCalls,
         structuredOutput: result.text
@@ -299,43 +366,29 @@ export function createAgent(config: AgentConfig) {
               type: 'tool_call',
               toolName: toolCall.toolName,
               args: toolCall.args,
-              toolResults: toolCall.args
+              toolResults: toolResultCache.get(JSON.stringify({ 
+                toolName: toolCall.toolName, 
+                args: toolCall.args 
+              }))
             }))
           ]
-        }],
-        toolResults: (result.toolCalls || []).reduce((acc, call) => {
-          Object.assign(acc, { [call.toolName]: call.args });
-          return acc;
-        }, {} as Record<string, unknown>)
+        }]
       };
 
-      // Log final result if tracing is available
+      // Update final trace
       if (trace) {
-        await safeTraceOperation(
-          async () => {
-            if (!trace) return;
-            
-            trace.span({
-              name: `${config.name}-agent-complete`,
-              id: mainSpanId,
-              output: {
-                text: result.text,
-                toolCalls: result.toolCalls,
-                structuredOutput: options.requireStructuredOutput ? result.text : undefined
-              }
-            });
-
-            // Update the trace with final results
-            trace.update({
-              output: {
-                text: result.text,
-                toolCalls: result.toolCalls,
-                structuredOutput: options.requireStructuredOutput ? result.text : undefined
-              }
-            });
+        trace.update({
+          output: {
+            response,
+            toolCalls: result.toolCalls,
+            finalText: result.text,
+            timestamp: new Date().toISOString()
           },
-          'Failed to log agent completion'
-        );
+          metadata: {
+            completionStatus: 'success',
+            toolsUsed: Array.from(toolResultCache.keys()).map(key => JSON.parse(key).toolName)
+          }
+        });
       }
 
       return response;
