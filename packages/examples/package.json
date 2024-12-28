@@ -4,11 +4,9 @@
   "type": "module",
   "scripts": {
     "test:langfuse": "bun run langfuse-agent-test.ts",
-    "test:conversation": "bun run conversation-test.ts",
-    "test:content": "bun run content/content-test.ts"
+    "test:conversation": "bun run conversation-test.ts"
   },
   "dependencies": {
-    "@ai-agents/core": "0.1.0",
     "dotenv": "^16.3.1",
     "langfuse": "^3.32.0",
     "zod": "^3.22.4"
