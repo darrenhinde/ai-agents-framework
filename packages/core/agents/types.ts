@@ -1,17 +1,55 @@
-import type { CoreTool, LanguageModelV1 } from 'ai';
-import type { LangfuseTraceClient, Langfuse } from 'langfuse';
+import { type AIStreamCallbacksAndOptions } from 'ai';
+import type {  LangfuseTraceClient,  Langfuse } from 'langfuse';
 import type { z } from 'zod';
 
-// Agent Configuration Types
+// Core Types for Agent Tools
+export interface AgentTool<TParams = unknown, TResult = unknown> {
+  name: string;
+  description: string;
+  parameters: z.ZodType<TParams>;
+  execute: (args: TParams, context: ToolContext) => Promise<TResult>;
+}
+
+// Runtime Context Types
+export interface ToolContext {
+  userId?: string;
+  dataStream?: any;
+  logging?: LoggingContext;
+  metadata?: Record<string, unknown>;
+}
+
+export interface LoggingContext {
+  logger?: Logger;
+  langfuse?: Langfuse;
+  trace?: LangfuseTraceClient;
+}
+
+export interface Logger {
+  debug: (message: string, meta?: Record<string, unknown>) => void;
+  info: (message: string, meta?: Record<string, unknown>) => void;
+  warn: (message: string, meta?: Record<string, unknown>) => void;
+  error: (message: string, meta?: Record<string, unknown>) => void;
+}
+
+// Agent Configuration
 export interface AgentConfig {
   name: string;
-  traceId?: string;
-  trace?: LangfuseTraceClient;
-  metadata?: Record<string, unknown>;
-  createNewTrace?: boolean;
-  langfuse?: Langfuse;
-  parentTraceId?: string;
-  isServerless?: boolean;
+  model: any; // Your LLM model reference
+  systemPrompt: string;
+  tools: Record<string, AgentTool>;
+  
+  // Optional configurations
+  maxSteps?: number;
+  temperature?: number;
+  maxTokens?: number;
+  requireStructuredOutput?: boolean;
+}
+
+// Runtime Options
+export interface AgentRuntimeOptions {
+  messages: AgentMessage[];
+  streamCallbacks?: Partial<AIStreamCallbacksAndOptions>;
+  context?: ToolContext;
 }
 
 export interface AgentMessage {
@@ -21,52 +59,16 @@ export interface AgentMessage {
   name?: string;
 }
 
-export interface AgentOptions {
-  maxSteps?: number;
-  systemPrompt: string;
-  tools?: Record<string, CoreTool<z.ZodType<Record<string, unknown>>, unknown>>;
-  model: LanguageModelV1;
-  requireStructuredOutput?: boolean;
-  messages?: AgentMessage[];
-  maxTokens?: number;
-  temperature?: number;
-}
+// Event Types for Streaming
+export type AgentEvent = 
+  | { type: 'tool-start'; content: { name: string; args: unknown } }
+  | { type: 'tool-end'; content: { name: string; result: unknown } }
+  | { type: 'step-complete'; content: { text: string; tokens: number } }
+  | { type: 'agent-complete'; content: { reason: string; output?: unknown } }
+  | { type: 'error'; content: { message: string; error?: unknown } };
 
-// Message and Response Types
-export interface MessageContent {
-  type: string;
-  text?: string;
-  toolCallId?: string;
-  toolName?: string;
-  args?: Record<string, unknown>;
-  toolResults?: unknown;
-}
-
-export interface Message {
-  role: string;
-  content: MessageContent[];
-}
-
-export interface AgentResponse {
-  messages?: Message[];
-  toolResults?: Record<string, unknown>;
-  structuredOutput?: unknown;
-  [key: string]: unknown;
-}
-
-// Debug Configuration
-export interface DebugOptions {
-  enabled: boolean;
-  level?: 'info' | 'debug' | 'verbose';
-  logToolCalls?: boolean;
-  logTraces?: boolean;
-  logResponses?: boolean;
-}
-
-export const defaultDebugOptions: DebugOptions = {
-  enabled: false,
-  level: 'info',
-  logToolCalls: true,
-  logTraces: true,
-  logResponses: true
-}; 
+// Agent Interface
+export interface Agent {
+  config: AgentConfig;
+  run: (options: AgentRuntimeOptions) => Promise<void>;
+} 
