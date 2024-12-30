@@ -35,6 +35,33 @@ export function generateUUID(): string {
   });
 }
 
+/**
+ * Creates a streaming agent that can process messages and interact with tools.
+ * Returns both the raw agent function and a convenience run method.
+ *
+ * @example
+ * ```ts
+ * // Create the agent
+ * const agent = createStreamingAgent({
+ *   model: getModel("gpt-4"),
+ *   systemPrompt: "You are a helpful assistant",
+ *   tools: { weather: weatherTool }
+ * });
+ *
+ * // Option 1: Use agent.run() for automatic streaming to stdout
+ * await agent.run([
+ *   { role: "user", content: "What's the weather?", id: "1" }
+ * ]);
+ *
+ * // Option 2: Use agent() directly to handle the stream yourself
+ * const response = await agent([
+ *   { role: "user", content: "What's the weather?", id: "1" }
+ * ]);
+ * for await (const chunk of response.textStream) {
+ *   // Handle chunks as needed
+ * }
+ * ```
+ */
 export function createStreamingAgent(config: AgentConfig) {
   const {
     model,
@@ -47,7 +74,7 @@ export function createStreamingAgent(config: AgentConfig) {
     session,
   } = config;
 
-  return async function (messages: Message[]) {
+  async function agent(messages: Message[]) {
     const trace = langfuse?.trace({
       name: "streaming-agent",
       userId: session?.user?.id,
@@ -117,5 +144,31 @@ export function createStreamingAgent(config: AgentConfig) {
     } finally {
       await langfuse?.flushAsync();
     }
+  }
+
+  agent.run = async (messages: Message[]) => {
+    try {
+      const response = await agent(messages);
+
+      // Handle streaming output
+      for await (const chunk of response.textStream) {
+        process.stdout.write(chunk);
+      }
+
+      // Get final results
+      const toolCalls = await response.toolCalls;
+      const toolResults = await response.toolResults;
+
+      return {
+        response,
+        toolCalls,
+        toolResults,
+      };
+    } catch (error) {
+      logger.error("Error running agent:", error);
+      throw error;
+    }
   };
+
+  return agent;
 }
