@@ -2,13 +2,13 @@ import {
   type Message,
   convertToCoreMessages,
   streamText,
-  NoSuchToolError,
-  InvalidToolArgumentsError,
-  LanguageModelV1,
-  CoreTool,
+  type NoSuchToolError,
+  type InvalidToolArgumentsError,
+  type LanguageModelV1,
+  type CoreTool,
 } from "ai";
 
-import { Langfuse } from "langfuse";
+import type { Langfuse } from "langfuse";
 
 export const logger = {
   debug: (...args: unknown[]) => console.debug("[DEBUG]", ...args),

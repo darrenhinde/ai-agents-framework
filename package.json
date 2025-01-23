@@ -20,6 +20,7 @@
   },
   "packageManager": "npm@10.2.4",
   "dependencies": {
+    "@vercel/functions": "^1.5.2",
     "ai": "^4.0.22",
     "langfuse": "^3.32.0",
     "zod": "^3.24.1"

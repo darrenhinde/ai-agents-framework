@@ -1,4 +1,4 @@
-import { orchestrateAgents } from "../agents/orchestrator";
+import { orchestrateAgents } from "../workflows/orchestrator";
 
 async function main() {
   try {

@@ -1,8 +1,8 @@
-import { routerAgent } from "./router-agent";
-import { strategyAgent } from "./strategy-agent";
-import { researchAgent } from "./research-agent";
-import { formatterAgent } from "./formatter-agent";
-import { publisherAgent } from "./publisher-agent";
+import { routerAgent } from "../agents/router-agent";
+import { strategyAgent } from "../agents/strategy-agent";
+import { researchAgent } from "../agents/research-agent";
+import { formatterAgent } from "../agents/formatter-agent";
+import { publisherAgent } from "../agents/publisher-agent";
 import type { Message } from "ai";
 
 interface ToolResult {

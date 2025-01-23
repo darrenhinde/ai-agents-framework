@@ -11,33 +11,33 @@ async function main() {
         role: "user",
         content: `Create a comprehensive content strategy with these details:
 
-Mission: Help tech professionals and businesses leverage AI and automation effectively.
+          Mission: Help tech professionals and businesses leverage AI and automation effectively.
 
-Target Audience: Software developers, tech leaders, and businesses interested in AI adoption.
+          Target Audience: Software developers, tech leaders, and businesses interested in AI adoption.
 
-Topics:
-1. AI Development
-2. Software Automation
-3. Tech Leadership
-4. Developer Productivity
+          Topics:
+          1. AI Development
+          2. Software Automation
+          3. Tech Leadership
+          4. Developer Productivity
 
-Content Types:
-- Actionable tutorials
-- Success stories
-- Technical analysis
-- Industry insights
-- Comparative studies
+          Content Types:
+          - Actionable tutorials
+          - Success stories
+          - Technical analysis
+          - Industry insights
+          - Comparative studies
 
-Content Formats:
-- LinkedIn: Mix of carousels, articles, and videos
-- Twitter: Threads and short videos
-- Blog: In-depth technical articles
+          Content Formats:
+          - LinkedIn: Mix of carousels, articles, and videos
+          - Twitter: Threads and short videos
+          - Blog: In-depth technical articles
 
-Please provide:
-1. Content matrix with ideas for each topic
-2. Monthly content calendar
-3. Posting schedule recommendations
-4. Engagement strategies`,
+          Please provide:
+          1. Content matrix with ideas for each topic
+          2. Monthly content calendar
+          3. Posting schedule recommendations
+          4. Engagement strategies`,
         id: "1",
       },
     ]);
