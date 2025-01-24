@@ -1,4 +1,4 @@
-import { createStreamingAgent } from "../wrappers/agent";
+import { createAgent, createStreamingAgent } from "../wrappers/agent";
 import { getModel } from "../../core/model-providers";
 import { wrapTool } from "../wrappers/tools";
 import { z } from "zod";
@@ -41,10 +41,10 @@ const loggingConfig = {
   },
 };
 
-const agent = createStreamingAgent(
+const agent = createAgent(
   {
     name: "weather-assistant",
-    model: getModel("google"),
+    model: getModel("gpt-4o-mini"),
     systemPrompt:
       "You are a helpful assistant with the ability to get the weather in a given city. Use the weather tool to provide accurate weather information.",
     tools: {
@@ -70,6 +70,7 @@ const agent = createStreamingAgent(
         toolset: ["weather"],
       },
     },
+    stream: true,
   },
   loggingConfig
 );

@@ -324,6 +324,263 @@ export function createStreamingAgent(
 }
 
 /**
+ * Creates a streaming agent that can process messages and interact with tools.
+ * You can optionally pass loggingConfig to enable or disable specific logging features.
+ */
+export function createTAgent(
+  config: AgentConfig,
+  loggingConfig?: LoggingConfig
+) {
+  const {
+    model,
+    systemPrompt,
+    tools = {},
+    maxSteps = 5,
+    maxTokens = 4096,
+    temperature = 0.7,
+    langfuse,
+    session,
+    experimental_activeTools,
+    name = "unnamed-agent",
+    traceConfig,
+  } = config;
+
+  // Create a logger with the provided config and Langfuse instance
+  const logger = createLogger({
+    ...loggingConfig,
+    langfuse: langfuse
+      ? {
+          langfuse,
+          defaultUserId: session?.user?.id,
+          defaultSessionId: session?.id?.toString(),
+          defaultTags: traceConfig?.tags || [],
+          traceConfig: {
+            name: traceConfig?.name || name,
+            tags: traceConfig?.tags,
+            metadata: {
+              agentName: name,
+              ...traceConfig?.metadata,
+            },
+          },
+        }
+      : undefined,
+    metadata: {
+      ...loggingConfig?.metadata,
+      agentName: name,
+    },
+  });
+
+  /**
+   * The core agent function that streams text
+   */
+  async function agent(messages: Message[]) {
+    // Create a unique trace ID for this run
+    const traceId = generateUUID();
+
+    // Start a new trace for this agent run
+    const trace = logger.langfuse?.startTrace({
+      name: traceConfig?.name || name,
+      userId: session?.user?.id,
+      sessionId: session?.id?.toString() || traceId,
+
+      metadata: {
+        agentName: name,
+        messageCount: messages.length,
+        startTime: new Date().toISOString(),
+        ...traceConfig?.metadata,
+      },
+      tags: ["agent", name, ...(traceConfig?.tags || [])],
+    });
+
+    // Set the current trace in the logger
+    if (trace) {
+      logger.setCurrentTrace(trace);
+    }
+
+    try {
+      // Log start using centralized method
+      logger.agentStart(name, messages.length, traceId);
+
+      const coreMessages = convertToCoreMessages(messages);
+
+      // Create a generation for the LLM call
+      const generation = trace?.generation({
+        name: `${name}-llm-call`,
+        model:
+          typeof model === "object" &&
+          "name" in model &&
+          typeof model.name === "string"
+            ? model.name
+            : "unknown",
+        modelParameters: {
+          temperature,
+          maxTokens,
+          systemPrompt,
+        },
+        input: {
+          messages: messages,
+          systemPrompt,
+        },
+        metadata: {
+          startTime: new Date().toISOString(),
+        },
+      });
+
+      // Stream text from the LLM or other model
+      const result = generateText({
+        model,
+        system: systemPrompt,
+        messages: coreMessages,
+        maxSteps,
+        maxTokens,
+        temperature,
+        tools,
+        experimental_activeTools,
+
+        onStepFinish: ({
+          text,
+          toolCalls,
+          toolResults,
+          finishReason,
+          usage,
+        }) => {
+          if (toolCalls?.length) {
+            // Start a new span for tool calls
+            logger.startSpan({
+              name: "tool-execution",
+              input: toolCalls,
+              metadata: {
+                toolCount: toolCalls.length,
+                tools: toolCalls.map((tc) => tc.toolName).join(", "),
+                startTime: new Date().toISOString(),
+              },
+            });
+          }
+
+          // Log tool results and update span
+          if (toolResults?.length) {
+            logger.updateSpan({
+              output: toolResults,
+              metadata: {
+                type: "tool-results",
+                endTime: new Date().toISOString(),
+              },
+            });
+          }
+        },
+      });
+      // End any active tool span
+      logger.endSpan();
+
+      // Process result from generateText
+      const { text: resultText, steps, response, usage } = await result;
+
+      // Log finish using centralized method
+      logger.agentFinish(name, "Finished", usage);
+
+      // Extract tool calls and results from steps
+      const allToolCalls = steps.flatMap((step) => step.toolCalls || []);
+      const allToolResults = steps.flatMap((step) => step.toolResults || []);
+
+      // Update trace with all results
+      trace?.update({
+        input: {
+          messages,
+          systemPrompt,
+        },
+        output: {
+          message: resultText,
+          toolCalls: allToolCalls,
+          toolResults: allToolResults,
+        },
+        metadata: {
+          response,
+          usage,
+          status: "completed",
+          completionTime: new Date().toISOString(),
+        },
+      });
+
+      // End the LLM generation with results
+      generation?.end({
+        output: response,
+        usage: usage && {
+          promptTokens: usage.promptTokens,
+          completionTokens: usage.completionTokens,
+          totalTokens: usage.totalTokens,
+        },
+        metadata: {
+          finishReason: "generation finished",
+          endTime: new Date().toISOString(),
+          toolCalls: allToolCalls,
+          toolResults: allToolResults,
+        },
+      });
+
+      return result;
+    } catch (error) {
+      // Log error using centralized method
+      logger.agentError(name, error);
+      throw error;
+    } finally {
+      // End the trace and flush logs
+      await logger.flush();
+    }
+  }
+
+  agent.run = async (messages: Message[]) => {
+    try {
+      logger.debug("Agent run invoked");
+      const result = await agent(messages);
+
+      // Initialize arrays to collect all tool calls and results
+      const allToolCalls: Array<{
+        type: "tool-call";
+        toolCallId: string;
+        toolName: string;
+        args: Record<string, unknown>;
+      }> = [];
+      const allToolResults: Array<{
+        type: "tool-result";
+        toolCallId: string;
+        toolName: string;
+        args: Record<string, unknown>;
+        result: unknown;
+      }> = [];
+
+      // Collect tool calls and results from all steps
+      const steps = result.steps;
+      for (const step of steps) {
+        if (step.toolCalls?.length) {
+          allToolCalls.push(...step.toolCalls);
+        }
+        if (step.toolResults?.length) {
+          allToolResults.push(...step.toolResults);
+        }
+      }
+
+      // Log completion using centralized method
+      logger.agentRunComplete(allToolCalls.length, allToolResults.length);
+
+      return {
+        result,
+        toolCalls: allToolCalls,
+        toolResults: allToolResults,
+        text: result.text,
+      };
+    } catch (error) {
+      logger.error("Error running agent", error);
+      throw error;
+    } finally {
+      // Non-blocking flush
+      await logger.flush();
+    }
+  };
+
+  return agent;
+}
+
+/**
  * Creates a non-streaming text generation agent
  */
 export function createTextAgent(
@@ -445,6 +702,25 @@ export function createObjectAgent<T>(
       logger.debug("Object agent finished");
     }
   }
+
+  return agent;
+}
+
+/**
+ * Creates a unified agent that can handle both streaming and non-streaming cases
+ * @param config Standard agent configuration plus streaming flag
+ * @param loggingConfig Optional logging configuration
+ */
+export function createAgent(
+  config: AgentConfig & { stream?: boolean | false },
+  loggingConfig?: LoggingConfig
+) {
+  const { stream = false, ...baseConfig } = config;
+
+  // Create appropriate agent based on stream flag
+  const agent = stream
+    ? createStreamingAgent(baseConfig, loggingConfig)
+    : createTAgent(baseConfig, loggingConfig);
 
   return agent;
 }

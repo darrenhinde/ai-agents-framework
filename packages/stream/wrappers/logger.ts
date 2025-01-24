@@ -229,7 +229,7 @@ export function createLogger(config?: LoggingConfig) {
           input: args,
           metadata: {
             toolName,
-            type: "tool-execution",
+            type: `tool-execution-${toolName}`,
           },
         });
       });
