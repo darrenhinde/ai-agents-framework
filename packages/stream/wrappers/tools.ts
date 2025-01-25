@@ -1,7 +1,10 @@
 import { tool } from "ai";
 import type { CoreTool } from "ai";
 import type { z } from "zod";
-import { createLogger, type LoggingConfig } from "./logger";
+import { createLogger, type LoggingConfig, type Logger } from "./logger";
+
+// Define a type for a tool factory function
+export type ToolFactory = (logger: Logger) => CoreTool;
 
 /**
  * Wraps a tool function with logging and standardized structure
@@ -10,7 +13,7 @@ import { createLogger, type LoggingConfig } from "./logger";
  * @param params - Configuration object for the tool
  * @param params.parameters - Zod schema defining the expected parameters
  * @param params.execute - Async function that implements the tool's logic
- * @returns A function that accepts optional logging config and returns a CoreTool
+ * @returns A function that accepts a logger instance and returns a CoreTool
  *
  * @example
  * ```ts
@@ -25,9 +28,9 @@ import { createLogger, type LoggingConfig } from "./logger";
  *   }
  * });
  *
- * // Use in agent with logging config
+ * // Use in agent with existing logger
  * tools: {
- *   weather: weatherTool(loggingConfig)
+ *   weather: weatherTool(logger)
  * }
  * ```
  */
@@ -35,37 +38,65 @@ export const wrapTool = <T extends z.ZodObject<z.ZodRawShape>, R>(config: {
   description: string;
   parameters: T;
   execute: (args: z.infer<T>) => Promise<R>;
-}) => {
+}): ToolFactory => {
   // Extract tool name from description for cleaner logging
   const toolName = config.description
     .toLowerCase()
     .split(" ")[0] // Take first word
     .replace(/[^a-z0-9]/g, "-"); // Clean up special characters
 
-  // Return a function that accepts logging config
-  return (loggingConfig?: LoggingConfig): CoreTool => {
-    const logger = createLogger(loggingConfig);
-
+  // Return a function that accepts logger instance
+  return (logger: Logger): CoreTool => {
     return tool({
       description: config.description,
       parameters: config.parameters,
       execute: async (args) => {
-        try {
-          // Start tool execution span
-          logger.toolStart(toolName, args);
+        // Start a new span for this tool execution
+        const span = logger.startSpan({
+          name: `tool-${toolName}`,
+          input: args,
+          metadata: {
+            toolName,
+            type: "tool-execution",
+            startTime: new Date().toISOString(),
+          },
+        });
 
+        try {
           const startTime = Date.now();
           const result = await config.execute(args);
           const duration = Date.now() - startTime;
 
-          // Log success and end span
-          logger.toolSuccess(toolName, duration, result);
+          // Update span with success result
+          logger.updateSpan({
+            output: result,
+            metadata: {
+              toolName,
+              duration,
+              status: "success",
+              endTime: new Date().toISOString(),
+            },
+          });
 
           return result;
         } catch (error) {
-          // Log error and end span
-          logger.toolError(toolName, error, args);
+          // Update span with error
+          logger.updateSpan({
+            output: {
+              error: error instanceof Error ? error.message : "Unknown error",
+            },
+            metadata: {
+              toolName,
+              status: "error",
+              severity: "ERROR",
+              stack: error instanceof Error ? error.stack : undefined,
+              endTime: new Date().toISOString(),
+            },
+          });
           throw error;
+        } finally {
+          // Always end the span
+          logger.endSpan();
         }
       },
     });

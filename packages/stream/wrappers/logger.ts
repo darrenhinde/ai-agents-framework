@@ -31,6 +31,9 @@ export interface LoggingConfig {
   currentTrace?: ReturnType<Langfuse["trace"]>;
 }
 
+// Export the Logger type for use in other files
+export type Logger = ReturnType<typeof createLogger>;
+
 const EVENT_TYPES = {
   TOOL_START: "tool.start",
   TOOL_SUCCESS: "tool.success",
@@ -400,6 +403,39 @@ export function createLogger(config?: LoggingConfig) {
       const flushPromise = Promise.all(flushPromises);
       return environmentWaitUntil(flushPromise);
     },
+    startOrRetrieveTrace: (params: {
+      name?: string;
+      traceId?: string;
+      sessionId?: string;
+      userId?: string;
+      metadata?: Record<string, unknown>;
+      tags?: string[];
+    }) => {
+      const trace = startOrRetrieveTraceWrapper(params);
+      if (trace) {
+        setCurrentTrace(trace);
+      }
+      return trace;
+    },
+    getCurrentTrace: () => currentTrace,
+    createGeneration: (params: {
+      name: string;
+      model: string;
+      modelParameters?: Record<string, unknown>;
+      input?: unknown;
+      metadata?: Record<string, unknown>;
+    }) => {
+      if (!currentTrace) return;
+      return currentTrace.generation({
+        name: params.name,
+        model: params.model,
+        input: params.input,
+        metadata: {
+          ...params.metadata,
+          startTime: new Date().toISOString(),
+        },
+      });
+    },
   };
 
   function log(
@@ -441,6 +477,72 @@ export function createLogger(config?: LoggingConfig) {
         },
       });
     }
+  }
+
+  function startOrRetrieveTrace(params: {
+    config?: LoggingConfig;
+    name?: string; // Agent name or default
+    traceId?: string; // Provided externally if we want to attach to an existing trace
+    sessionId?: string; // If we want a session grouping
+    userId?: string; // If available from session
+    metadata?: Record<string, unknown>;
+    tags?: string[];
+  }) {
+    const {
+      config,
+      name = "unnamed-agent",
+      traceId,
+      sessionId,
+      userId,
+      metadata,
+      tags,
+    } = params;
+
+    // Reuse currentTrace if it exists and if the IDs match
+    if (config?.currentTrace && config.currentTrace.id === traceId) {
+      return config.currentTrace;
+    }
+
+    // If we have Langfuse, either create a new trace or retrieve an existing one
+    // For demonstration, we always create a new one if traceId doesn't match currentTrace
+    const newTrace = config?.langfuse?.langfuse.trace({
+      id: traceId, // might be generated or passed in
+      name,
+      sessionId,
+      userId,
+      metadata,
+      tags,
+    });
+
+    // If we track it in config, set it as currentTrace
+    if (newTrace && config) {
+      config.currentTrace = newTrace;
+    }
+
+    return newTrace;
+  }
+
+  function startOrRetrieveTraceWrapper(params: {
+    name?: string;
+    traceId?: string;
+    sessionId?: string;
+    userId?: string;
+    metadata?: Record<string, unknown>;
+    tags?: string[];
+  }) {
+    // 1) Get the newly created or existing trace
+    const trace = startOrRetrieveTrace({
+      config,
+      ...params,
+    });
+
+    // 2) Update the logger's local currentTrace
+    if (trace) {
+      setCurrentTrace(trace); // <= calls currentTrace = trace;
+    }
+
+    // Finally return it for convenience
+    return trace;
   }
 
   return logger;

@@ -9,7 +9,11 @@ import {
 } from "ai";
 import type { z, ZodType } from "zod";
 import type { Langfuse } from "langfuse";
-import { createLogger, type LoggingConfig } from "./logger";
+import { createLogger, type LoggingConfig, type Logger } from "./logger";
+import type { ToolFactory } from "./tools";
+
+// Define agent types
+export type AgentType = "streaming" | "text" | "object";
 
 // Define a generic session type that can be extended by the consumer
 export interface Session {
@@ -23,7 +27,7 @@ export interface Session {
 export interface AgentConfig {
   model: LanguageModelV1;
   systemPrompt: string;
-  tools?: Record<string, CoreTool>;
+  tools?: Record<string, ToolFactory>;
   maxSteps?: number;
   maxTokens?: number;
   temperature?: number;
@@ -34,6 +38,7 @@ export interface AgentConfig {
   name?: string; // Name of the agent for tracing
   traceConfig?: {
     name?: string; // Override trace name if different from agent name
+    traceId?: string; // Override trace ID if different from agent name
     tags?: string[];
     metadata?: Record<string, unknown>;
   };
@@ -51,10 +56,10 @@ export function generateUUID(): string {
 }
 
 /**
- * Creates a streaming agent that can process messages and interact with tools.
- * You can optionally pass loggingConfig to enable or disable specific logging features.
+ * Creates a logger with the provided configuration and returns key parameters
+ * used by all agent functions.
  */
-export function createStreamingAgent(
+function setupLoggerAndConfig(
   config: AgentConfig,
   loggingConfig?: LoggingConfig
 ) {
@@ -97,41 +102,192 @@ export function createStreamingAgent(
     },
   });
 
-  /**
-   * The core agent function that streams text
-   */
-  async function agent(messages: Message[]) {
-    // Create a unique trace ID for this run
-    const traceId = generateUUID();
+  // Initialize tools with the logger using explicit accumulation
+  const initializedTools = Object.entries(tools).reduce(
+    (acc, [key, toolFn]) => {
+      // Create a span for tool initialization
+      const span = logger.startSpan({
+        name: `init-tool-${key}`,
+        metadata: {
+          toolName: key,
+          type: "tool-initialization",
+        },
+      });
 
-    // Start a new trace for this agent run
-    const trace = logger.langfuse?.startTrace({
-      name: traceConfig?.name || name,
-      userId: session?.user?.id,
-      sessionId: session?.id?.toString() || traceId,
+      try {
+        // Initialize the tool with the logger
+        acc[key] = toolFn(logger);
 
-      metadata: {
-        agentName: name,
-        messageCount: messages.length,
-        startTime: new Date().toISOString(),
-        ...traceConfig?.metadata,
-      },
-      tags: ["agent", name, ...(traceConfig?.tags || [])],
-    });
+        // Update span with success
+        logger.updateSpan({
+          metadata: {
+            status: "success",
+            endTime: new Date().toISOString(),
+          },
+        });
+      } catch (error) {
+        // Log initialization error
+        logger.updateSpan({
+          metadata: {
+            status: "error",
+            error: error instanceof Error ? error.message : "Unknown error",
+            severity: "ERROR",
+            endTime: new Date().toISOString(),
+          },
+        });
+        throw error;
+      } finally {
+        logger.endSpan();
+      }
 
-    // Set the current trace in the logger
-    if (trace) {
-      logger.setCurrentTrace(trace);
+      return acc;
+    },
+    {} as Record<string, CoreTool>
+  );
+
+  return {
+    model,
+    systemPrompt,
+    tools: initializedTools,
+    maxSteps,
+    maxTokens,
+    temperature,
+    langfuse,
+    session,
+    experimental_activeTools,
+    name,
+    traceConfig,
+    logger,
+  };
+}
+
+/**
+ * Starts a trace for an agent run, returning both the trace object and the trace ID.
+ */
+function startAgentTrace(
+  logger: ReturnType<typeof createLogger>,
+  config: AgentConfig,
+  messages: Message[],
+  agentType: AgentType
+) {
+  const { session, name = "unnamed-agent", traceConfig } = config;
+
+  // 1) We check if a traceId exists in traceConfig (or generate one)
+  const traceId = traceConfig?.traceId || generateUUID();
+  // ^ Example usage: if we want to allow an external trace ID, or else generate one
+
+  // 2) We call the logger method
+  const trace = logger.startOrRetrieveTrace({
+    name: traceConfig?.name || name,
+    traceId,
+    sessionId: session?.id?.toString(),
+    userId: session?.user?.id,
+    metadata: {
+      agentName: name,
+      agentType,
+      messageCount: messages.length,
+      startTime: new Date().toISOString(),
+      ...traceConfig?.metadata,
+    },
+    tags: ["agent", name, agentType, ...(traceConfig?.tags || [])],
+  });
+
+  // 3) Log the agent start event
+  logger.agentStart(name, messages.length, traceId);
+
+  return { trace, traceId };
+}
+
+/**
+ * Gathers tool calls and tool results from an array of steps.
+ */
+function collectToolData(
+  steps: Array<{
+    toolCalls?: Array<{
+      type: string;
+      toolCallId: string;
+      toolName: string;
+      args: Record<string, unknown>;
+    }>;
+    toolResults?: Array<{
+      type: string;
+      toolCallId: string;
+      toolName: string;
+      args: Record<string, unknown>;
+      result: unknown;
+    }>;
+  }>
+) {
+  const allToolCalls: Array<{
+    type: string;
+    toolCallId: string;
+    toolName: string;
+    args: Record<string, unknown>;
+  }> = [];
+  const allToolResults: Array<{
+    type: string;
+    toolCallId: string;
+    toolName: string;
+    args: Record<string, unknown>;
+    result: unknown;
+  }> = [];
+
+  for (const step of steps) {
+    if (step.toolCalls) {
+      allToolCalls.push(
+        ...step.toolCalls.map((call) => ({
+          ...call,
+          type: "tool-roundup",
+        }))
+      );
     }
+    if (step.toolResults) {
+      allToolResults.push(
+        ...step.toolResults.map((result) => ({
+          ...result,
+          type: "tool-roundup",
+        }))
+      );
+    }
+  }
+
+  return { allToolCalls, allToolResults };
+}
+
+/**
+ * Creates a streaming agent that can process messages and interact with tools.
+ */
+export function createStreamingAgent(
+  config: AgentConfig,
+  loggingConfig?: LoggingConfig
+) {
+  const {
+    model,
+    systemPrompt,
+    tools,
+    maxSteps,
+    maxTokens,
+    temperature,
+    session,
+    experimental_activeTools,
+    name,
+    traceConfig,
+    logger,
+  } = setupLoggerAndConfig(config, loggingConfig);
+
+  async function agent(messages: Message[]) {
+    const { trace, traceId } = startAgentTrace(
+      logger,
+      config,
+      messages,
+      "streaming"
+    );
 
     try {
-      // Log start using centralized method
-      logger.agentStart(name, messages.length, traceId);
-
       const coreMessages = convertToCoreMessages(messages);
 
-      // Create a generation for the LLM call
-      const generation = trace?.generation({
+      // Create generation through logger
+      const generation = logger.createGeneration({
         name: `${name}-llm-call`,
         model:
           typeof model === "object" &&
@@ -145,11 +301,12 @@ export function createStreamingAgent(
           systemPrompt,
         },
         input: {
-          messages: messages,
+          messages,
           systemPrompt,
         },
         metadata: {
           startTime: new Date().toISOString(),
+          agentType: "streaming",
         },
       });
 
@@ -163,18 +320,10 @@ export function createStreamingAgent(
         temperature,
         tools,
         experimental_activeTools,
-
-        onStepFinish: ({
-          text,
-          toolCalls,
-          toolResults,
-          finishReason,
-          usage,
-        }) => {
+        onStepFinish: ({ toolCalls, toolResults }) => {
           if (toolCalls?.length) {
-            // Start a new span for tool calls
             logger.startSpan({
-              name: "tool-execution",
+              name: `${toolCalls[0].toolName}-tool`,
               input: toolCalls,
               metadata: {
                 toolCount: toolCalls.length,
@@ -184,7 +333,6 @@ export function createStreamingAgent(
             });
           }
 
-          // Log tool results and update span
           if (toolResults?.length) {
             logger.updateSpan({
               output: toolResults,
@@ -195,7 +343,6 @@ export function createStreamingAgent(
             });
           }
         },
-
         onFinish: async ({
           response,
           toolCalls,
@@ -205,11 +352,9 @@ export function createStreamingAgent(
         }) => {
           // End any active tool span
           logger.endSpan();
-
-          // Log finish using centralized method
+          // Log finish
           logger.agentFinish(name, finishReason, usage);
-
-          // End the LLM generation with results
+          // End the LLM generation
           generation?.end({
             output: response,
             usage: usage && {
@@ -222,7 +367,7 @@ export function createStreamingAgent(
               endTime: new Date().toISOString(),
             },
           });
-          // Update the main trace with final results
+
           const lastMessage = response.messages[response.messages.length - 1];
           const lastContent = lastMessage.content[0];
           const resultText =
@@ -234,7 +379,7 @@ export function createStreamingAgent(
 
           trace?.update({
             input: {
-              messages: messages,
+              messages,
               systemPrompt,
             },
             output: {
@@ -247,6 +392,7 @@ export function createStreamingAgent(
               usage,
               status: "completed",
               completionTime: new Date().toISOString(),
+              agentType: "streaming",
             },
           });
         },
@@ -254,11 +400,9 @@ export function createStreamingAgent(
 
       return result;
     } catch (error) {
-      // Log error using centralized method
       logger.agentError(name, error);
       throw error;
     } finally {
-      // End the trace and flush logs
       await logger.flush();
     }
   }
@@ -268,41 +412,17 @@ export function createStreamingAgent(
       logger.debug("Agent run invoked");
       const result = await agent(messages);
 
-      // Initialize arrays to collect all tool calls and results
-      const allToolCalls: Array<{
-        type: "tool-call";
-        toolCallId: string;
-        toolName: string;
-        args: Record<string, unknown>;
-      }> = [];
-      const allToolResults: Array<{
-        type: "tool-result";
-        toolCallId: string;
-        toolName: string;
-        args: Record<string, unknown>;
-        result: unknown;
-      }> = [];
-
-      // Collect the streamed text while maintaining streaming to output
+      // Collect streamed text
       let streamedText = "";
       for await (const chunk of result.textStream) {
         streamedText += chunk;
-        // Still write to stdout for real-time feedback
         process.stdout.write(chunk);
       }
 
-      // Collect tool calls and results from all steps
+      // Collect all tool calls and results
       const steps = await result.steps;
-      for (const step of steps) {
-        if (step.toolCalls?.length) {
-          allToolCalls.push(...step.toolCalls);
-        }
-        if (step.toolResults?.length) {
-          allToolResults.push(...step.toolResults);
-        }
-      }
+      const { allToolCalls, allToolResults } = collectToolData(steps);
 
-      // Log completion using centralized method
       logger.agentRunComplete(allToolCalls.length, allToolResults.length);
 
       return {
@@ -310,6 +430,7 @@ export function createStreamingAgent(
         toolCalls: allToolCalls,
         toolResults: allToolResults,
         text: streamedText,
+        agentType: "streaming" as AgentType,
       };
     } catch (error) {
       logger.error("Error running agent", error);
@@ -324,83 +445,36 @@ export function createStreamingAgent(
 }
 
 /**
- * Creates a streaming agent that can process messages and interact with tools.
- * You can optionally pass loggingConfig to enable or disable specific logging features.
+ * Creates a 'TAgent' that uses generateText instead of streamText.
+ * Effectively a non-streaming approach but preserves step/tool logging.
  */
-export function createTAgent(
+export function createTextAgent(
   config: AgentConfig,
   loggingConfig?: LoggingConfig
 ) {
   const {
     model,
     systemPrompt,
-    tools = {},
-    maxSteps = 5,
-    maxTokens = 4096,
-    temperature = 0.7,
-    langfuse,
+    tools,
+    maxSteps,
+    maxTokens,
+    temperature,
     session,
     experimental_activeTools,
-    name = "unnamed-agent",
+    name,
     traceConfig,
-  } = config;
+    logger,
+  } = setupLoggerAndConfig(config, loggingConfig);
 
-  // Create a logger with the provided config and Langfuse instance
-  const logger = createLogger({
-    ...loggingConfig,
-    langfuse: langfuse
-      ? {
-          langfuse,
-          defaultUserId: session?.user?.id,
-          defaultSessionId: session?.id?.toString(),
-          defaultTags: traceConfig?.tags || [],
-          traceConfig: {
-            name: traceConfig?.name || name,
-            tags: traceConfig?.tags,
-            metadata: {
-              agentName: name,
-              ...traceConfig?.metadata,
-            },
-          },
-        }
-      : undefined,
-    metadata: {
-      ...loggingConfig?.metadata,
-      agentName: name,
-    },
-  });
-
-  /**
-   * The core agent function that streams text
-   */
   async function agent(messages: Message[]) {
-    // Create a unique trace ID for this run
-    const traceId = generateUUID();
-
-    // Start a new trace for this agent run
-    const trace = logger.langfuse?.startTrace({
-      name: traceConfig?.name || name,
-      userId: session?.user?.id,
-      sessionId: session?.id?.toString() || traceId,
-
-      metadata: {
-        agentName: name,
-        messageCount: messages.length,
-        startTime: new Date().toISOString(),
-        ...traceConfig?.metadata,
-      },
-      tags: ["agent", name, ...(traceConfig?.tags || [])],
-    });
-
-    // Set the current trace in the logger
-    if (trace) {
-      logger.setCurrentTrace(trace);
-    }
+    const { trace, traceId } = startAgentTrace(
+      logger,
+      config,
+      messages,
+      "text"
+    );
 
     try {
-      // Log start using centralized method
-      logger.agentStart(name, messages.length, traceId);
-
       const coreMessages = convertToCoreMessages(messages);
 
       // Create a generation for the LLM call
@@ -418,15 +492,16 @@ export function createTAgent(
           systemPrompt,
         },
         input: {
-          messages: messages,
+          messages,
           systemPrompt,
         },
         metadata: {
           startTime: new Date().toISOString(),
+          agentType: "non-streaming",
         },
       });
 
-      // Stream text from the LLM or other model
+      // Generate text from the LLM
       const result = generateText({
         model,
         system: systemPrompt,
@@ -436,18 +511,10 @@ export function createTAgent(
         temperature,
         tools,
         experimental_activeTools,
-
-        onStepFinish: ({
-          text,
-          toolCalls,
-          toolResults,
-          finishReason,
-          usage,
-        }) => {
+        onStepFinish: ({ toolCalls, toolResults }) => {
           if (toolCalls?.length) {
-            // Start a new span for tool calls
             logger.startSpan({
-              name: "tool-execution",
+              name: `${toolCalls[0].toolName}-tool`,
               input: toolCalls,
               metadata: {
                 toolCount: toolCalls.length,
@@ -456,8 +523,6 @@ export function createTAgent(
               },
             });
           }
-
-          // Log tool results and update span
           if (toolResults?.length) {
             logger.updateSpan({
               output: toolResults,
@@ -469,20 +534,18 @@ export function createTAgent(
           }
         },
       });
+
       // End any active tool span
       logger.endSpan();
 
-      // Process result from generateText
+      // Await final generation
       const { text: resultText, steps, response, usage } = await result;
 
-      // Log finish using centralized method
       logger.agentFinish(name, "Finished", usage);
 
-      // Extract tool calls and results from steps
-      const allToolCalls = steps.flatMap((step) => step.toolCalls || []);
-      const allToolResults = steps.flatMap((step) => step.toolResults || []);
+      // Gather all tool calls and results
+      const { allToolCalls, allToolResults } = collectToolData(steps);
 
-      // Update trace with all results
       trace?.update({
         input: {
           messages,
@@ -498,10 +561,11 @@ export function createTAgent(
           usage,
           status: "completed",
           completionTime: new Date().toISOString(),
+          agentType: "non-streaming",
         },
       });
 
-      // End the LLM generation with results
+      // Close out the LLM generation
       generation?.end({
         output: response,
         usage: usage && {
@@ -519,11 +583,10 @@ export function createTAgent(
 
       return result;
     } catch (error) {
-      // Log error using centralized method
-      logger.agentError(name, error);
+      logger.agentError(name || "unnamed-agent", error);
       throw error;
     } finally {
-      // End the trace and flush logs
+      // Flush logs
       await logger.flush();
     }
   }
@@ -533,33 +596,9 @@ export function createTAgent(
       logger.debug("Agent run invoked");
       const result = await agent(messages);
 
-      // Initialize arrays to collect all tool calls and results
-      const allToolCalls: Array<{
-        type: "tool-call";
-        toolCallId: string;
-        toolName: string;
-        args: Record<string, unknown>;
-      }> = [];
-      const allToolResults: Array<{
-        type: "tool-result";
-        toolCallId: string;
-        toolName: string;
-        args: Record<string, unknown>;
-        result: unknown;
-      }> = [];
-
-      // Collect tool calls and results from all steps
       const steps = result.steps;
-      for (const step of steps) {
-        if (step.toolCalls?.length) {
-          allToolCalls.push(...step.toolCalls);
-        }
-        if (step.toolResults?.length) {
-          allToolResults.push(...step.toolResults);
-        }
-      }
+      const { allToolCalls, allToolResults } = collectToolData(steps);
 
-      // Log completion using centralized method
       logger.agentRunComplete(allToolCalls.length, allToolResults.length);
 
       return {
@@ -567,12 +606,12 @@ export function createTAgent(
         toolCalls: allToolCalls,
         toolResults: allToolResults,
         text: result.text,
+        agentType: "text" as AgentType,
       };
     } catch (error) {
       logger.error("Error running agent", error);
       throw error;
     } finally {
-      // Non-blocking flush
       await logger.flush();
     }
   };
@@ -581,69 +620,7 @@ export function createTAgent(
 }
 
 /**
- * Creates a non-streaming text generation agent
- */
-export function createTextAgent(
-  config: AgentConfig,
-  loggingConfig?: LoggingConfig
-) {
-  const {
-    model,
-    systemPrompt,
-    tools = {},
-    maxTokens = 4096,
-    temperature = 0.7,
-    langfuse,
-    session,
-    experimental_activeTools,
-  } = config;
-
-  const logger = createLogger(loggingConfig);
-
-  async function agent(messages: Message[]) {
-    const trace = langfuse?.trace({
-      name: "text-agent",
-      userId: session?.user?.id,
-      metadata: {
-        sessionId: session || "no session token",
-        route: "text-agent",
-      },
-    });
-
-    try {
-      logger.debug("Text agent started", { messagesCount: messages.length });
-      const coreMessages = convertToCoreMessages(messages);
-
-      const result = await generateText({
-        model,
-        system: systemPrompt,
-        messages: coreMessages,
-        maxTokens,
-        temperature,
-        tools,
-        experimental_activeTools,
-      });
-
-      trace?.update({
-        output: result,
-      });
-
-      return result;
-    } catch (error) {
-      logger.error("Error in text agent", error);
-      throw error;
-    } finally {
-      // Non-blocking flush
-      await logger.flush();
-      logger.debug("Text agent finished");
-    }
-  }
-
-  return agent;
-}
-
-/**
- * Creates a non-streaming object generation agent
+ * Creates a non-streaming object generation agent (uses Zod schema validation).
  */
 export function createObjectAgent<T>(
   config: AgentConfig,
@@ -652,15 +629,15 @@ export function createObjectAgent<T>(
   const {
     model,
     systemPrompt,
-    tools = {},
-    maxTokens = 4096,
-    temperature = 0.7,
+    tools,
+    maxTokens,
+    temperature,
     langfuse,
     session,
     experimental_activeTools,
-  } = config;
-
-  const logger = createLogger(loggingConfig);
+    logger,
+  } = setupLoggerAndConfig(config, loggingConfig);
+  const { schema } = config;
 
   async function agent(messages: Message[]) {
     const trace = langfuse?.trace({
@@ -669,13 +646,15 @@ export function createObjectAgent<T>(
       metadata: {
         sessionId: session || "no session token",
         route: "object-agent",
+        agentType: "object",
       },
     });
 
     try {
       logger.debug("Object agent started", { messagesCount: messages.length });
       const coreMessages = convertToCoreMessages(messages);
-      if (!config.schema) {
+
+      if (!schema) {
         throw new Error("Schema is required for object generation");
       }
 
@@ -685,19 +664,21 @@ export function createObjectAgent<T>(
         messages: coreMessages,
         maxTokens,
         temperature,
-        schema: config.schema as unknown as ZodType<T>,
+        schema: schema as unknown as ZodType<T>,
       });
 
       trace?.update({
         output: result,
+        metadata: {
+          agentType: "object",
+        },
       });
 
-      return result;
+      return { ...result, agentType: "object" as AgentType };
     } catch (error) {
       logger.error("Error in object agent", error);
       throw error;
     } finally {
-      // Non-blocking flush
       await logger.flush();
       logger.debug("Object agent finished");
     }
@@ -707,20 +688,16 @@ export function createObjectAgent<T>(
 }
 
 /**
- * Creates a unified agent that can handle both streaming and non-streaming cases
- * @param config Standard agent configuration plus streaming flag
- * @param loggingConfig Optional logging configuration
+ * Creates a unified agent that can handle both streaming and non-streaming cases.
  */
 export function createAgent(
-  config: AgentConfig & { stream?: boolean | false },
+  config: AgentConfig & { stream?: boolean },
   loggingConfig?: LoggingConfig
 ) {
   const { stream = false, ...baseConfig } = config;
 
-  // Create appropriate agent based on stream flag
-  const agent = stream
+  // Choose between streaming or TAgent based on the 'stream' flag
+  return stream
     ? createStreamingAgent(baseConfig, loggingConfig)
-    : createTAgent(baseConfig, loggingConfig);
-
-  return agent;
+    : createTextAgent(baseConfig, loggingConfig);
 }
