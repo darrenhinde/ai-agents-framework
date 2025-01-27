@@ -51,52 +51,76 @@ export const wrapTool = <T extends z.ZodObject<z.ZodRawShape>, R>(config: {
       description: config.description,
       parameters: config.parameters,
       execute: async (args) => {
-        // Start a new span for this tool execution
-        const span = logger.startSpan({
-          name: `tool-${toolName}`,
-          input: args,
-          metadata: {
-            toolName,
-            type: "tool-execution",
-            startTime: new Date().toISOString(),
-          },
-        });
-
+        let span;
         try {
+          // Start a new span for this tool execution
+          try {
+            span = logger.startSpan({
+              name: `tool-${toolName}`,
+              input: args,
+              metadata: {
+                toolName,
+                type: "tool-execution",
+                startTime: new Date().toISOString(),
+              },
+            });
+          } catch (error) {
+            // Silently handle logging errors
+            console.warn("Failed to start logging span:", error);
+          }
+
           const startTime = Date.now();
           const result = await config.execute(args);
           const duration = Date.now() - startTime;
 
           // Update span with success result
-          logger.updateSpan({
-            output: result,
-            metadata: {
-              toolName,
-              duration,
-              status: "success",
-              endTime: new Date().toISOString(),
-            },
-          });
+          try {
+            logger.updateSpan({
+              output: result,
+              metadata: {
+                toolName,
+                duration,
+                status: "success",
+                endTime: new Date().toISOString(),
+              },
+            });
+          } catch (error) {
+            // Silently handle logging errors
+            console.warn("Failed to update logging span:", error);
+          }
 
           return result;
         } catch (error) {
           // Update span with error
-          logger.updateSpan({
-            output: {
-              error: error instanceof Error ? error.message : "Unknown error",
-            },
-            metadata: {
-              toolName,
-              status: "error",
-              severity: "ERROR",
-              stack: error instanceof Error ? error.stack : undefined,
-              endTime: new Date().toISOString(),
-            },
-          });
+          try {
+            logger.updateSpan({
+              output: {
+                error: error instanceof Error ? error.message : "Unknown error",
+              },
+              metadata: {
+                toolName,
+                status: "error",
+                severity: "ERROR",
+                stack: error instanceof Error ? error.stack : undefined,
+                endTime: new Date().toISOString(),
+              },
+            });
+          } catch (loggingError) {
+            // Silently handle logging errors
+            console.warn(
+              "Failed to update logging span with error:",
+              loggingError
+            );
+          }
           throw error;
         } finally {
-          // Always end the span
-          logger.endSpan();
+          // Always try to end the span
+          try {
+            logger.endSpan();
+          } catch (error) {
+            // Silently handle logging errors
+            console.warn("Failed to end logging span:", error);
+          }
         }
       },
     });
