@@ -64,7 +64,7 @@ const weatherTool = wrapTool({
 const agent = createAgent(
   {
     name: "weather-assistant",
-    model: getModel("ollama"),
+    model: getModel("gpt-4o-mini"),
     systemPrompt: `You are an expert weather assistant with deep knowledge of weather conditions and forecasting.
     You help users get accurate weather information for any location.
     

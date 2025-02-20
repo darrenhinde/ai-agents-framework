@@ -1,0 +1,62 @@
+---
+description: 
+globs: 
+---
+
+# Your rule content
+
+- You can @ files here
+- You can use markdown but dont have to
+    Code Implementation Guidelines
+    Planning Phase
+    - Begin with step-by-step planning
+
+    Development Philosophy
+    - Write clean, maintainable, and scalable code
+    - Follow SOLID principles
+    - Prefer functional and declarative programming patterns over imperative
+   - Modular coding is better!! Always try keep the code concise and easy to flow. NEVER OVER COMPLICATE IT, use comments to explain steps in your code. 
+
+
+    Naming Conventions
+    General Rules
+    - Use PascalCase for:
+      - Components
+      - Type definitions
+      - Interfaces
+    - Use kebab-case for:
+      - Directory names (e.g., components/auth-wizard)
+      - File names (e.g., user-profile.tsx)
+    - Use camelCase for:
+      - Variables
+      - Functions
+      - Methods
+      - Hooks
+      - Properties
+      - Props
+    - Use UPPERCASE for:
+      - Environment variables
+      - Constants
+      - Global configurations
+
+    Specific Naming Patterns
+    - Prefix event handlers with 'handle': handleClick, handleSubmit
+    - Prefix boolean variables with verbs: isLoading, hasError, canSubmit
+    - Prefix custom hooks with 'use': useAuth, useForm
+    - Use complete words over abbreviations except for:
+      - err (error)
+      - req (request)
+      - res (response)
+      - props (properties)
+      - ref (reference)
+
+    Testing
+    Unit Testing
+    - Write thorough unit tests to validate individual functions and components.
+    - Follow patterns like Arrange-Act-Assert to ensure clarity and consistency in tests.
+    - Mock external dependencies and API calls to isolate unit tests.
+
+
+    Security
+    - Implement input sanitization to prevent XSS attacks.
+    - Use proper authentication methods.

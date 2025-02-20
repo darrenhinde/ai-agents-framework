@@ -1,5 +1,5 @@
 {
-  "name": "@ai-agents/examples",
+  "name": "@ai-agents-framework/examples",
   "version": "0.1.0",
   "type": "module",
   "scripts": {

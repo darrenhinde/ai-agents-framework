@@ -327,6 +327,7 @@ export function createStreamingAgent(
             someOtherThing: "other-value",
           },
         },
+
         onStepFinish: ({ toolCalls, toolResults }) => {
           if (toolCalls?.length) {
             logger.startSpan({
@@ -518,6 +519,13 @@ export function createTextAgent(
         temperature,
         tools,
         experimental_activeTools,
+        experimental_telemetry: {
+          isEnabled: true,
+          metadata: {
+            something: "custom",
+            someOtherThing: "other-value",
+          },
+        },
         onStepFinish: ({ toolCalls, toolResults }) => {
           if (toolCalls?.length) {
             logger.startSpan({
